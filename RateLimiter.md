@@ -42,7 +42,7 @@ Here are a few general guidelines:
 - Building your own rate limiting service takes time. If you do not have enough engineering resources to implement a rate limiter, a commercial API gateway is a better option.
 
 
-## 5. Algorithms for rate limiting
+## 5. Popular algorithms for rate limiting
 - Token bucket
 - Leaking bucket
 - Fixed window counter
