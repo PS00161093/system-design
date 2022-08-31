@@ -72,3 +72,22 @@ Here are a few general guidelines:
   - Token bucket allows a burst of traffic for short periods. A request can go through as long as there are tokens left.
 - **Cons**
   - Two parameters in the algorithm are bucket size and token refill rate. However, it might be challenging to tune them properly
+
+### **Leaking bucket algorithm**
+- Similar to the token bucket except that requests are processed at a fixed rate.
+- Usually implemented with a first-in-first-out (FIFO) queue.
+- Shopify uses this alogorithm.
+- **Working Principle**
+  - When a request arrives, the system checks if the queue is full.
+  - If it is not full, the request is added to the queue.
+  - Otherwise, the request is dropped.
+  - Requests are pulled from the queue and processed at regular intervals.
+  - This algorithm takes 2 parameters:
+    - **Bucket size**: it is equal to the queue size. The queue holds the requests to be processed at a fixed rate.
+    - **Outflow rate:** it defines how many requests can be processed at a fixed rate, usually in seconds.
+- **Pros**
+  - Memory efficient given the limited queue size.
+  - Requests are processed at a fixed rate therefore it is suitable for use cases that a stable outflow rate is needed.
+- **Cons**
+  - A burst of traffic fills up the queue with old requests, and if they are not processed in time, recent requests will be rate limited.
+  - There are two parameters in the algorithm. It might not be easy to tune them properly.
