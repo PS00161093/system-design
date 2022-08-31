@@ -49,7 +49,7 @@ Here are a few general guidelines:
 - Sliding window log
 - Sliding window counter
 
-### **Token bucket algorithm**
+### `Token bucket algorithm`
 - Simple, well understood & widely used.
 - Commonly used by internet companies like Amazon, Stripe.
 - **Working Principle**
@@ -73,7 +73,7 @@ Here are a few general guidelines:
 - **Cons**
   - Two parameters in the algorithm are bucket size and token refill rate. However, it might be challenging to tune them properly
 
-### **Leaking bucket algorithm**
+### `Leaking bucket algorithm`
 - Similar to the token bucket except that requests are processed at a fixed rate.
 - Usually implemented with a first-in-first-out (FIFO) queue.
 - Shopify uses this alogorithm.
@@ -92,7 +92,7 @@ Here are a few general guidelines:
   - A burst of traffic fills up the queue with old requests, and if they are not processed in time, recent requests will be rate limited.
   - There are two parameters in the algorithm. It might not be easy to tune them properly.
 
-### **Fixed window counter algorithm**
+### `Fixed window counter algorithm`
 - **Working Principle**
   - The algorithm divides the timeline into fix-sized time windows and assign a counter for each window.
   - Each request increments the counter by one.
