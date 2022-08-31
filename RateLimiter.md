@@ -91,3 +91,14 @@ Here are a few general guidelines:
 - **Cons**
   - A burst of traffic fills up the queue with old requests, and if they are not processed in time, recent requests will be rate limited.
   - There are two parameters in the algorithm. It might not be easy to tune them properly.
+
+### **Fixed window counter algorithm**
+- **Working Principle**
+  - The algorithm divides the timeline into fix-sized time windows and assign a counter for each window.
+  - Each request increments the counter by one.
+  - Once the counter reaches the pre-defined threshold, new requests are dropped until a new time window starts.
+- **Pros**
+  - Easy to understand.
+  - Resetting available quota at the end of a unit time window fits certain use cases.
+- **Cons**
+  - Spike in traffic at the edges of a window could cause more requests than the allowed quota to go through.
