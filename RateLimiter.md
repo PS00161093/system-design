@@ -137,7 +137,7 @@ Here are a few general guidelines:
   - It only works for not-so-strict look back window.
   - It is an approximation of the actual rate because it assumes requests in the previous window are evenly distributed.
 
-## Where shall we store counters?
+## 6. Where shall we store counters?
 - Using the database is not a good idea due to slowness of disk access. 
 - In-memory cache is chosen because it is fast and supports time-based expiration strategy. 
 - For instance, Redis is a popular option to implement rate limiting. 
@@ -151,16 +151,26 @@ Here are a few general guidelines:
 - If the limit is not reached, the request is sent to API servers.
 - Meanwhile, the system increments the counter and saves it back to Redis.
 
-## Rate limiting rules
+## 7. Rate limiting rules
 Rules are generally written in configuration files and saved on disk.
 
-## Exceeding the rate limit
+## 8. Exceeding the rate limit
 In case a request is rate limited, APIs return a HTTP response code 429 (too many requests) to the client. Depending on the use cases, we may enqueue the ratelimited requests to be processed later. For example, if some orders are rate limited due to system overload, we may keep those orders to be processed later.
 
-## Rate limiter headers
+## 9. Rate limiter headers
 - How does a client know whether it is being throttled? And how does a client know the number of allowed remaining requests before being throttled? 
 - **The answer lies in HTTP response headers.**
 - The rate limiter returns the following HTTP headers to clients:
   - `X-Ratelimit-Remaining`: The remaining number of allowed requests within the window.
   - `X-Ratelimit-Limit`: It indicates how many calls the client can make per time window.
   - `X-Ratelimit-Retry-After`: The number of seconds to wait until you can make a request again without being throttled. When a user has sent too many requests, a 429 too many requests error and X-Ratelimit-Retry-After header are returned to the client.
+
+## 10. Request flow:
+- Rules are stored on the disk. Workers frequently pull rules from the disk and store them in the cache.
+- When a client sends a request to the server, the request is sent to the rate limiter middleware first.
+- Rate limiter middleware loads rules from the cache.
+- It fetches counters and last request timestamp from Redis cache.
+- Based on the response, the rate limiter decides, if the request is not rate limited, it is forwarded to API servers.
+- if the request is rate limited, the rate limiter returns 429 too many requests error to the client.
+- In the meantime, the request is either dropped or forwarded to the queue.
+- 
