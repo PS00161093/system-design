@@ -1,5 +1,5 @@
 # System design for an API Rate Limiter
-![Rate Limiter HLD]([http://url/to/img.png](https://github.com/PS00161093/system-design/blob/main/images/HLD_Rate_Limiter.jpg))
+![HLD](/images/HLD_Rate_Limiter.jpg)
 
 ## 1. What is a Rate limiter?
 In a network system, a rate limiter is used to control the rate of traffic sent by a client or a service. In the HTTP world, a rate limiter limits the number of client requests allowed to be sent over a specified period. If the API request count exceeds the threshold defined by the rate limiter, all the excess calls are blocked.
