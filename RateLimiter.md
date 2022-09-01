@@ -173,4 +173,25 @@ In case a request is rate limited, APIs return a HTTP response code 429 (too man
 - Based on the response, the rate limiter decides, if the request is not rate limited, it is forwarded to API servers.
 - if the request is rate limited, the rate limiter returns 429 too many requests error to the client.
 - In the meantime, the request is either dropped or forwarded to the queue.
+
+## 11. Rate limiter in a distributed environment
+- Building a rate limiter that works in a single server environment is not difficult. However, scaling the system to support multiple servers and concurrent threads is a different story. There are two challenges:
+  - Race condition
+  - Synchronization issue
+
+### **Race condition**
+- If two requests concurrently read the counter value before either of them writes the value back, each will increment the counter by one and write it back without checking the other thread. Both requests (threads) believe they have the correct counter value.
+- Locks are the most obvious solution for solving race condition. However, locks will significantly slow down the system.
+- Two strategies are commonly used to solve the problem:
+  - Lua script
+  - Sorted sets data structure in Redis
+
+### **Synchronization issue**
+- To support millions of users, one rate limiter server might not be enough to handle the traffic.
+- When multiple rate limiter servers are used, synchronization is required.
+- As the web tier is stateless, clients can send requests to a different rate limiter.
+- If no synchronization happens, rate limiter 1 does not contain any data about client 2. Thus, the rate limiter cannot work properly.
+- One possible solution is to use sticky sessions that allow a client to send traffic to the same rate limiter.
+- This solution is not advisable because it is neither scalable nor flexible.
+- A better approach is to use centralized data stores like Redis.
 - 
