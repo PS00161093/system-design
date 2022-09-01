@@ -137,3 +137,30 @@ Here are a few general guidelines:
   - It only works for not-so-strict look back window.
   - It is an approximation of the actual rate because it assumes requests in the previous window are evenly distributed.
 
+## Where shall we store counters?
+- Using the database is not a good idea due to slowness of disk access. 
+- In-memory cache is chosen because it is fast and supports time-based expiration strategy. 
+- For instance, Redis is a popular option to implement rate limiting. 
+- It is an in-memory store that offers two commands:
+ - INCR: It increases the stored counter by 1.
+ - EXPIRE: It sets a timeout for the counter. 
+- If the timeout expires, the counter is automatically deleted.
+- The client sends a request to rate limiting middleware.
+- Rate limiting middleware fetches the counter from the corresponding bucket in Redis and checks if the limit is reached or not.
+- If the limit is reached, the request is rejected.
+- If the limit is not reached, the request is sent to API servers.
+- Meanwhile, the system increments the counter and saves it back to Redis.
+
+## Rate limiting rules
+Rules are generally written in configuration files and saved on disk.
+
+## Exceeding the rate limit
+In case a request is rate limited, APIs return a HTTP response code 429 (too many requests) to the client. Depending on the use cases, we may enqueue the ratelimited requests to be processed later. For example, if some orders are rate limited due to system overload, we may keep those orders to be processed later.
+
+## Rate limiter headers
+- How does a client know whether it is being throttled? And how does a client know the number of allowed remaining requests before being throttled? 
+- **The answer lies in HTTP response headers.**
+- The rate limiter returns the following HTTP headers to clients:
+  - `X-Ratelimit-Remaining`: The remaining number of allowed requests within the window.
+  - `X-Ratelimit-Limit`: It indicates how many calls the client can make per time window.
+  - `X-Ratelimit-Retry-After`: The number of seconds to wait until you can make a request again without being throttled. When a user has sent too many requests, a 429 too many requests error and X-Ratelimit-Retry-After header are returned to the client.
