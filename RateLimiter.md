@@ -175,7 +175,7 @@ In case a request is rate limited, APIs return a HTTP response code 429 (too man
 - In the meantime, the request is either dropped or forwarded to the queue.
 
 ## 11. Rate limiter in a distributed environment
-- Building a rate limiter that works in a single server environment is not difficult. However, scaling the system to support multiple servers and concurrent threads is a different story. There are two challenges:
+Building a rate limiter that works in a single server environment is not difficult. However, scaling the system to support multiple servers and concurrent threads is a different story. There are two challenges:
   - Race condition
   - Synchronization issue
 
@@ -194,4 +194,14 @@ In case a request is rate limited, APIs return a HTTP response code 429 (too man
 - One possible solution is to use sticky sessions that allow a client to send traffic to the same rate limiter.
 - This solution is not advisable because it is neither scalable nor flexible.
 - A better approach is to use centralized data stores like Redis.
-- 
+
+## 12. Performance optimization
+- First optimization: Multi-data center setup is crucial for a rate limiter because latency is high for users located far away from the data center. Most cloud service providers build many edge server locations around the world. Traffic is automatically routed to the closest edge server to reduce latency.
+- Second Optimisation: Synchronize data with an eventual consistency model. 
+
+## 13. Monitoring
+After the rate limiter is put in place, it is important to gather analytics data to check whether the rate limiter is effective. Primarily, we want to make sure:
+- The rate limiting algorithm is effective.
+- The rate limiting rules are effective.
+For example, if rate limiting rules are too strict, many valid requests are dropped. In this case, we want to relax the rules a little bit. 
+In another example, we notice our rate limiter becomes ineffective when there is a sudden increase in traffic like flash sales. In this scenario, we may replace the algorithm to support burst traffic. **Token bucket is a good fit here.**
