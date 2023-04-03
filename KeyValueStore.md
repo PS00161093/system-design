@@ -20,3 +20,13 @@ Design a key-value store that comprises of the following characteristics:
 - Automatic scaling: The addition/deletion of servers should be automatic based on traffic.
 - Tunable consistency.
 - Low latency.
+
+# Single server key-value store
+- Developing a key-value store that resides in a single server is easy. 
+- An intuitive approach is to store key-value pairs in a hash table, which keeps everything in memory. 
+- Even though memory access is fast, fitting everything in memory may be impossible due to the space constraint. 
+- Two optimizations can be done to fit more data in a single server:
+  - Data compression
+  - Store only frequently used data in memory and the rest on disk 
+- Even with these optimizations, a single server can reach its capacity very quickly. 
+- A distributed key value store is required to support big data.
