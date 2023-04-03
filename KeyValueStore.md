@@ -38,3 +38,15 @@ CAP theorem states it is impossible for a distributed system to simultaneously p
 - Partition Tolerance: a partition indicates a communication break between two nodes. Partition tolerance means the system continues to operate despite network partitions. 
 
 CAP theorem states that one of the three properties must be sacrificed to support 2 of the 3 properties.
+
+Some popular key-value store systems are Dynamo, Cassandra & BigTable.
+
+# System components
+- Data partition
+- Data replication
+- Consistency
+- Inconsistency resolution
+- Handling failures
+- System architecture diagram
+- Write path
+- Read path
