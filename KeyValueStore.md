@@ -50,3 +50,22 @@ Some popular key-value store systems are Dynamo, Cassandra & BigTable.
 - System architecture diagram
 - Write path
 - Read path
+
+# Data partition
+- For large applications, it is infeasible to fit the complete data set in a single server. 
+- The simplest way to accomplish this is to split the data into smaller partitions and store them in multiple servers. 
+- There are two challenges while partition in the data:
+  - Distribute data across multiple servers evenly.
+  - Minimize data movement when nodes are added or removed.
+- Consistent hashing is a great technique to solve these problems.
+
+# Data replication
+- To achieve high availability and reliability, data must be replicated asynchronously over N servers, where N is a configurable parameter. 
+- These N servers are chosen using a logic: 
+  - after a key is mapped to a position on the hash ring, 
+  - walk clockwise from that position and 
+  - choose the first N servers on the ring to store data copies.
+- With virtual nodes, the first N nodes on the ring may be owned by fewer than N physical servers. 
+- To avoid this issue, we only choose unique servers while performing the clockwise walk logic.
+- Nodes in the same data center often fail at the same time due to power outages, network issues, natural disasters, etc. 
+- For better reliability, replicas are placed in distinct data centers, and data centers are connected through high-speed networks.
