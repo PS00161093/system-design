@@ -105,3 +105,42 @@ How to configure N, W, and R to fit our use cases? Here are some of the possible
 
 - Strong consistency is usually achieved by forcing a replica not to accept new reads/writes until every replica has agreed on current write. This approach is not ideal for highly available systems because it could block new operations. 
 - Dynamo and Cassandra adopt eventual consistency, which is our recommended consistency model for our key-value store. From concurrent writes, eventual consistency allows inconsistent values to enter the system and force the client to read the values to reconcile.
+
+# Inconsistency resolution: versioning
+- Replication gives high availability but causes inconsistencies among replicas. 
+- Versioning and vector clocks are used to solve inconsistency problems. 
+- Versioning means treating each data modification as a new immutable version of data.
+
+Before we talk about versioning, let us use an example to explain how inconsistency happens: assume, 
+- both replica nodes n1 and n2 have the same value. 
+- Let us call this value the original value. Server 1 and server 2 get the same value for get(“name”) operation.
+- Next, server 1 changes the name to “johnSanFrancisco”, and server 2 changes the name to “johnNewYork”
+- These two changes are performed simultaneously. Now, we have conflicting values, called versions v1 and v2.
+
+To resolve this issue, we need a versioning system that can detect conflicts and reconcile conflicts. 
+- A vector clock is a common technique to solve this problem. 
+- Let us examine how vector clocks work. 
+- A vector clock is a [server, version] pair associated with a data item. 
+- It can be used to check if one version precedes, succeeds, or in conflict with others.
+- Assume a vector clock is represented by D([S1, v1], [S2, v2], …, [Sn, vn]), where D is a data item, v1 is a version counter, and s1 is a server number, etc. 
+- If data item D is written to server Si, the system must perform one of the following tasks:
+  - Increment vi if [Si, vi] exists.
+  - Otherwise, create a new entry [Si, 1].
+
+The above abstract logic is explained with a concrete example:
+- A client writes a data item D1 to the system, and the write is handled by server Sx, which now has the vector clock D1[(Sx, 1)].
+- Another client reads the latest D1, updates it to D2, and writes it back. D2 descends from D1 so it overwrites D1. Assume the write is handled by the same server Sx, which now has vector clock D2([Sx, 2]).
+- Another client reads the latest D2, updates it to D3, and writes it back. Assume the write is handled by server Sy, which now has vector clock D3([Sx, 2], [Sy, 1])).
+- Another client reads the latest D2, updates it to D4, and writes it back. Assume the write is handled by server Sz, which now has D4([Sx, 2], [Sz, 1])).
+- When another client reads D3 and D4, it discovers a conflict, which is caused by data item D2 being modified by both Sy and Sz. The conflict is resolved by the client and updated data is sent to the server. Assume the write is handled by Sx, which now has D5([Sx, 3], [Sy, 1], [Sz, 1]).
+
+Using vector clocks, it is easy to tell that a version X is an ancestor (i.e. no conflict) of version Y 
+- if the version counters for each participant in the vector clock of Y is greater than or equal to the ones in version X. 
+- For example, the vector clock D([s0, 1], [s1, 1])] is an ancestor of D([s0, 1], [s1, 2]). Therefore, no conflict is recorded.
+
+Similarly, you can tell that a version X is a sibling (i.e., a conflict exists) of Y 
+- if there is any participant in Y's vector clock who has a counter that is less than its corresponding counter in X. For example, the following two vector clocks indicate there is a conflict: D([s0, 1], [s1, 2]) and D([s0, 2], [s1, 1]).
+
+Even though vector clocks can resolve conflicts, there are two notable downsides. 
+- First, vector clocks add complexity to the client because it needs to implement conflict resolution logic. 
+- Second, the [server: version] pairs in the vector clock could grow rapidly. To fix this problem, we set a threshold for the length, and if it exceeds the limit, the oldest pairs are removed. This can lead to inefficiencies in reconciliation because the descendant relationship cannot be determined accurately. However, based on Dynamo paper [4], Amazon has not yet encountered this problem in production; therefore, it is probably an acceptable solution for most companies.
