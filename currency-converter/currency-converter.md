@@ -454,7 +454,17 @@ public class CurrencyConverterService {
 
     // Start the service with automatic rate updates
     public void start() throws RateServiceUnavailableException {
-        serviceLock.lock();
+        try {
+            // Try to acquire lock with timeout to avoid indefinite blocking
+            if (!serviceLock.tryLock(10, TimeUnit.SECONDS)) {
+                throw new RateServiceUnavailableException("Service start",
+                    "Unable to acquire service lock - another thread may be starting/stopping the service");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RateServiceUnavailableException("Service start", "Interrupted while waiting for service lock");
+        }
+
         try {
             if (running) {
                 return;
@@ -553,28 +563,67 @@ interface ExchangeRateProvider {
 
 ### Concurrent Control Strategy
 
-The service uses **ReentrantLock** instead of `synchronized` for better control over concurrent access:
+The service uses **ReentrantLock with tryLock()** instead of `synchronized` for better control over concurrent access:
 
 ```java
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.TimeUnit;
 
 public class CurrencyConverterService {
     private final ReentrantLock serviceLock = new ReentrantLock();
 
-    // Benefits of ReentrantLock over synchronized:
+    // Benefits of ReentrantLock with tryLock() over synchronized:
     // 1. Explicit lock/unlock with try-finally blocks
-    // 2. Better timeout control and interruption handling
-    // 3. More readable and maintainable code
-    // 4. Support for condition variables if needed later
+    // 2. Timeout control prevents indefinite blocking
+    // 3. Interruption handling for responsive shutdown
+    // 4. More readable and maintainable code
     // 5. Better performance characteristics under contention
+    // 6. Fail-fast behavior when lock cannot be acquired
 
-    public void criticalSection() {
-        serviceLock.lock();
+    public void responsiveOperation() throws ServiceException {
+        try {
+            // Try to acquire lock with timeout
+            if (!serviceLock.tryLock(10, TimeUnit.SECONDS)) {
+                throw new ServiceException("Unable to acquire lock - operation timeout");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new ServiceException("Interrupted while waiting for lock");
+        }
+
         try {
             // Critical section code here
             // Exception-safe with guaranteed unlock
         } finally {
             serviceLock.unlock(); // Always executed
+        }
+    }
+
+    // Different timeout strategies for different operations
+    public void quickOperation() throws ServiceException {
+        // Short timeout for fast operations
+        if (!serviceLock.tryLock(100, TimeUnit.MILLISECONDS)) {
+            throw new ServiceException("Quick operation timeout");
+        }
+        try {
+            // Fast critical section
+        } finally {
+            serviceLock.unlock();
+        }
+    }
+
+    public void emergencyShutdown() {
+        // Non-blocking attempt for emergency scenarios
+        if (serviceLock.tryLock()) {
+            try {
+                // Clean shutdown if possible
+                performCleanShutdown();
+            } finally {
+                serviceLock.unlock();
+            }
+        } else {
+            // Force shutdown if lock cannot be acquired immediately
+            performForceShutdown();
         }
     }
 }
@@ -1292,9 +1341,18 @@ public class OptimizedCurrencyConverter {
     // Use ReadWriteLock for frequent reads with occasional writes
     private final ReadWriteLock rateCacheLock = new ReentrantReadWriteLock();
 
-    // Read operations (high frequency)
-    public ConversionResult convert(String from, String to, double amount) {
-        rateCacheLock.readLock().lock();
+    // Read operations (high frequency) - use tryLock for responsiveness
+    public ConversionResult convert(String from, String to, double amount) throws ConversionException {
+        try {
+            // Short timeout for read operations to maintain responsiveness
+            if (!rateCacheLock.readLock().tryLock(50, TimeUnit.MILLISECONDS)) {
+                throw new ConversionException("Rate cache temporarily unavailable - try again");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new ConversionException("Conversion interrupted");
+        }
+
         try {
             // Multiple threads can read concurrently
             return performConversion(from, to, amount);
@@ -1303,14 +1361,38 @@ public class OptimizedCurrencyConverter {
         }
     }
 
-    // Write operations (less frequent)
-    public void updateRates(List<ExchangeRate> rates) {
-        rateCacheLock.writeLock().lock();
+    // Write operations (less frequent) - longer timeout acceptable
+    public void updateRates(List<ExchangeRate> rates) throws RateUpdateException {
+        try {
+            // Longer timeout for write operations (rate updates are less frequent)
+            if (!rateCacheLock.writeLock().tryLock(5, TimeUnit.SECONDS)) {
+                throw new RateUpdateException("Unable to update rates - cache is busy");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RateUpdateException("Rate update interrupted");
+        }
+
         try {
             // Exclusive access for rate updates
             batchUpdateRates(rates);
         } finally {
             rateCacheLock.writeLock().unlock();
+        }
+    }
+
+    // Emergency read with immediate fallback
+    public ConversionResult convertWithFallback(String from, String to, double amount) {
+        // Try non-blocking read first
+        if (rateCacheLock.readLock().tryLock()) {
+            try {
+                return performConversion(from, to, amount);
+            } finally {
+                rateCacheLock.readLock().unlock();
+            }
+        } else {
+            // Fallback to cached or default rate if lock not available
+            return performFallbackConversion(from, to, amount);
         }
     }
 }
