@@ -425,6 +425,8 @@ class ConversionFailedException extends CurrencyConverterException {
 ### CurrencyConverterService Architecture
 
 ```java
+import java.util.concurrent.locks.ReentrantLock;
+
 public class CurrencyConverterService {
     private final CurrencyConverter converter;
     private final ExchangeRateProvider rateProvider;
@@ -434,6 +436,7 @@ public class CurrencyConverterService {
 
     private volatile boolean running = false;
     private ScheduledFuture<?> updateTask;
+    private final ReentrantLock serviceLock = new ReentrantLock();
 
     // Service statistics
     private volatile long totalServiceConversions = 0;
@@ -450,26 +453,31 @@ public class CurrencyConverterService {
     }
 
     // Start the service with automatic rate updates
-    public synchronized void start() throws RateServiceUnavailableException {
-        if (running) {
-            return;
-        }
-
-        // Initial rate fetch
+    public void start() throws RateServiceUnavailableException {
+        serviceLock.lock();
         try {
-            fetchAndUpdateRates();
-        } catch (Exception e) {
-            throw new RateServiceUnavailableException("Initial rate fetch", e);
-        }
+            if (running) {
+                return;
+            }
 
-        // Start automatic updates if enabled
-        if (autoUpdate) {
-            startAutomaticUpdates();
-        }
+            // Initial rate fetch
+            try {
+                fetchAndUpdateRates();
+            } catch (Exception e) {
+                throw new RateServiceUnavailableException("Initial rate fetch", e);
+            }
 
-        running = true;
-        System.out.println("CurrencyConverterService started with " +
-                converter.getCachedRates().size() + " exchange rates");
+            // Start automatic updates if enabled
+            if (autoUpdate) {
+                startAutomaticUpdates();
+            }
+
+            running = true;
+            System.out.println("CurrencyConverterService started with " +
+                    converter.getCachedRates().size() + " exchange rates");
+        } finally {
+            serviceLock.unlock();
+        }
     }
 
     // Periodic rate updates with scheduling
@@ -540,6 +548,35 @@ public class CurrencyConverterService {
 interface ExchangeRateProvider {
     List<ExchangeRate> fetchLatestRates() throws Exception;
     String getProviderName();
+}
+```
+
+### Concurrent Control Strategy
+
+The service uses **ReentrantLock** instead of `synchronized` for better control over concurrent access:
+
+```java
+import java.util.concurrent.locks.ReentrantLock;
+
+public class CurrencyConverterService {
+    private final ReentrantLock serviceLock = new ReentrantLock();
+
+    // Benefits of ReentrantLock over synchronized:
+    // 1. Explicit lock/unlock with try-finally blocks
+    // 2. Better timeout control and interruption handling
+    // 3. More readable and maintainable code
+    // 4. Support for condition variables if needed later
+    // 5. Better performance characteristics under contention
+
+    public void criticalSection() {
+        serviceLock.lock();
+        try {
+            // Critical section code here
+            // Exception-safe with guaranteed unlock
+        } finally {
+            serviceLock.unlock(); // Always executed
+        }
+    }
 }
 ```
 
@@ -1240,7 +1277,44 @@ public class CurrencyConverterServiceTest {
 
 ### Optimization Strategies
 
+#### Concurrent Utilities Over Synchronized
+
 ```java
+// Better concurrent control with explicit locks
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+
+public class OptimizedCurrencyConverter {
+    // Use ReentrantLock for exclusive operations
+    private final ReentrantLock serviceLock = new ReentrantLock();
+
+    // Use ReadWriteLock for frequent reads with occasional writes
+    private final ReadWriteLock rateCacheLock = new ReentrantReadWriteLock();
+
+    // Read operations (high frequency)
+    public ConversionResult convert(String from, String to, double amount) {
+        rateCacheLock.readLock().lock();
+        try {
+            // Multiple threads can read concurrently
+            return performConversion(from, to, amount);
+        } finally {
+            rateCacheLock.readLock().unlock();
+        }
+    }
+
+    // Write operations (less frequent)
+    public void updateRates(List<ExchangeRate> rates) {
+        rateCacheLock.writeLock().lock();
+        try {
+            // Exclusive access for rate updates
+            batchUpdateRates(rates);
+        } finally {
+            rateCacheLock.writeLock().unlock();
+        }
+    }
+}
+
 // Rate key generation optimization with string interning
 private String generateRateKey(String from, String to) {
     // Normalize to uppercase once and use efficient string concatenation
