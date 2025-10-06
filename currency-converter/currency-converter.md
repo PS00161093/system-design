@@ -146,19 +146,49 @@ private final Set<String> supportedCurrencies = ConcurrentHashMap.newKeySet();
 
 #### Currency Conversion Logic
 
-```typescript
-public convert(from: string, to: string, amount: number): ConversionResult {
-    this.validateCurrencyPair(from, to);
+```java
+public ConversionResult convert(String fromCurrency, String toCurrency, double amount)
+        throws CurrencyConverterException {
 
-    if (from === to) {
-        return this.createConversionResult(from, to, amount, amount, 1);
+    validateCurrencyPair(fromCurrency, toCurrency);
+    validateAmount(amount);
+
+    fromCurrency = fromCurrency.toUpperCase();
+    toCurrency = toCurrency.toUpperCase();
+
+    totalConversions++;
+
+    // Same currency conversion
+    if (fromCurrency.equals(toCurrency)) {
+        return createConversionResult(fromCurrency, toCurrency, amount, amount, 1.0, "same");
     }
 
-    const exchangeRate = this.getExchangeRate(from, to);
-    const convertedAmount = amount * exchangeRate;
+    // Check conversion cache first
+    if (cacheConversions) {
+        String cacheKey = generateCacheKey(fromCurrency, toCurrency, amount);
+        ConversionResult cachedResult = conversionCache.get(cacheKey);
+        if (cachedResult != null && !isResultExpired(cachedResult)) {
+            cacheHits++;
+            return cachedResult;
+        }
+    }
 
-    const result = this.createConversionResult(from, to, amount, convertedAmount, exchangeRate);
-    this.cacheConversionResult(result);
+    cacheMisses++;
+
+    // Get exchange rate and perform conversion
+    ExchangeRateResult rateResult = getExchangeRate(fromCurrency, toCurrency);
+    double convertedAmount = amount * rateResult.getRate();
+
+    ConversionResult result = createConversionResult(
+            fromCurrency, toCurrency, amount, convertedAmount,
+            rateResult.getRate(), rateResult.getPath()
+    );
+
+    // Cache the result
+    if (cacheConversions) {
+        String cacheKey = generateCacheKey(fromCurrency, toCurrency, amount);
+        conversionCache.put(cacheKey, result);
+    }
 
     return result;
 }
@@ -166,35 +196,69 @@ public convert(from: string, to: string, amount: number): ConversionResult {
 
 #### Exchange Rate Resolution
 
-```typescript
-public getExchangeRate(from: string, to: string): number {
-    this.validateCurrencyPair(from, to);
+```java
+public ExchangeRateResult getExchangeRate(String fromCurrency, String toCurrency)
+        throws CurrencyConverterException {
 
-    if (from === to) return 1;
+    validateCurrencyPair(fromCurrency, toCurrency);
+
+    fromCurrency = fromCurrency.toUpperCase();
+    toCurrency = toCurrency.toUpperCase();
+
+    if (fromCurrency.equals(toCurrency)) {
+        return new ExchangeRateResult(1.0, "same");
+    }
 
     // Try direct rate
-    const directKey = this.generateRateKey(from, to);
-    if (this.rates[directKey]) {
-        return this.rates[directKey].rate;
+    String directKey = generateRateKey(fromCurrency, toCurrency);
+    ExchangeRate directRate = rateCache.get(directKey);
+    if (directRate != null && !directRate.isExpired(rateExpirationMinutes)) {
+        return new ExchangeRateResult(directRate.getRate(), "direct");
     }
 
     // Try inverse rate
-    const inverseKey = this.generateRateKey(to, from);
-    if (this.rates[inverseKey]) {
-        return 1 / this.rates[inverseKey].rate;
+    String inverseKey = generateRateKey(toCurrency, fromCurrency);
+    ExchangeRate inverseRate = rateCache.get(inverseKey);
+    if (inverseRate != null && !inverseRate.isExpired(rateExpirationMinutes)) {
+        return new ExchangeRateResult(1.0 / inverseRate.getRate(), "inverse");
     }
 
     // Try triangular conversion through USD
-    if (from !== 'USD' && to !== 'USD') {
-        const fromToUsd = this.getDirectRate('USD', from);
-        const toToUsd = this.getDirectRate('USD', to);
+    if (!fromCurrency.equals("USD") && !toCurrency.equals("USD")) {
+        ExchangeRate fromToUsd = getDirectRate("USD", fromCurrency);
+        ExchangeRate toToUsd = getDirectRate("USD", toCurrency);
 
-        if (fromToUsd && toToUsd) {
-            return toToUsd / fromToUsd;
+        if (fromToUsd != null && toToUsd != null &&
+                !fromToUsd.isExpired(rateExpirationMinutes) &&
+                !toToUsd.isExpired(rateExpirationMinutes)) {
+
+            double rate = toToUsd.getRate() / fromToUsd.getRate();
+            return new ExchangeRateResult(rate, String.format("triangular_via_USD(%s->USD->%s)", fromCurrency, toCurrency));
         }
     }
 
-    throw new RateNotFoundError(from, to);
+    // Try multi-hop conversion through other major currencies
+    String[] intermediateCurrencies = {"EUR", "GBP", "JPY"};
+    for (String intermediate : intermediateCurrencies) {
+        if (!intermediate.equals(fromCurrency) && !intermediate.equals(toCurrency)) {
+            try {
+                ExchangeRateResult step1 = getDirectExchangeRate(fromCurrency, intermediate);
+                ExchangeRateResult step2 = getDirectExchangeRate(intermediate, toCurrency);
+
+                if (step1 != null && step2 != null) {
+                    double combinedRate = step1.getRate() * step2.getRate();
+                    String path = String.format("multi_hop_via_%s(%s->%s->%s)",
+                            intermediate, fromCurrency, intermediate, toCurrency);
+                    return new ExchangeRateResult(combinedRate, path);
+                }
+            } catch (Exception e) {
+                // Continue to next intermediate currency
+            }
+        }
+    }
+
+    // No rate found
+    throw new RateNotFoundException(fromCurrency, toCurrency);
 }
 ```
 
@@ -212,49 +276,147 @@ EUR → JPY conversion without direct EUR/JPY rate:
 
 ## Type System
 
-### Core Types
+### Core Classes
 
-```typescript
+```java
 // Exchange rate with metadata
-interface ExchangeRate {
-    from: string;
-    to: string;
-    rate: number;
-    timestamp: Date;
+public class ExchangeRate {
+    private final String fromCurrency;
+    private final String toCurrency;
+    private final double rate;
+    private final LocalDateTime timestamp;
+
+    public ExchangeRate(String fromCurrency, String toCurrency, double rate, LocalDateTime timestamp) {
+        if (fromCurrency == null || fromCurrency.trim().isEmpty()) {
+            throw new IllegalArgumentException("From currency cannot be null or empty");
+        }
+        if (toCurrency == null || toCurrency.trim().isEmpty()) {
+            throw new IllegalArgumentException("To currency cannot be null or empty");
+        }
+        if (rate <= 0) {
+            throw new IllegalArgumentException("Exchange rate must be positive");
+        }
+        if (timestamp == null) {
+            throw new IllegalArgumentException("Timestamp cannot be null");
+        }
+
+        this.fromCurrency = fromCurrency.toUpperCase();
+        this.toCurrency = toCurrency.toUpperCase();
+        this.rate = rate;
+        this.timestamp = timestamp;
+    }
+
+    // Getters and utility methods
+    public String getFromCurrency() { return fromCurrency; }
+    public String getToCurrency() { return toCurrency; }
+    public double getRate() { return rate; }
+    public LocalDateTime getTimestamp() { return timestamp; }
+
+    public String getKey() { return fromCurrency + "_" + toCurrency; }
+    public boolean isExpired(long maxAgeMinutes) {
+        return timestamp.plusMinutes(maxAgeMinutes).isBefore(LocalDateTime.now());
+    }
 }
 
 // Conversion result with full context
-interface ConversionResult {
-    fromCurrency: string;
-    toCurrency: string;
-    originalAmount: number;
-    convertedAmount: number;
-    exchangeRate: number;
-    timestamp: Date;
-}
+public class ConversionResult {
+    private final String fromCurrency;
+    private final String toCurrency;
+    private final double originalAmount;
+    private final double convertedAmount;
+    private final double exchangeRate;
+    private final LocalDateTime timestamp;
+    private final String conversionPath;
 
-// Currency pair for validation
-interface CurrencyPair {
-    from: string;
-    to: string;
+    public ConversionResult(String fromCurrency, String toCurrency, double originalAmount,
+                            double convertedAmount, double exchangeRate, LocalDateTime timestamp,
+                            String conversionPath) {
+        this.fromCurrency = fromCurrency.toUpperCase();
+        this.toCurrency = toCurrency.toUpperCase();
+        this.originalAmount = originalAmount;
+        this.convertedAmount = Math.round(convertedAmount * 100.0) / 100.0;
+        this.exchangeRate = exchangeRate;
+        this.timestamp = timestamp;
+        this.conversionPath = conversionPath != null ? conversionPath : "direct";
+    }
+
+    // Getters and utility methods
+    public String getFromCurrency() { return fromCurrency; }
+    public String getToCurrency() { return toCurrency; }
+    public double getOriginalAmount() { return originalAmount; }
+    public double getConvertedAmount() { return convertedAmount; }
+    public double getExchangeRate() { return exchangeRate; }
+    public LocalDateTime getTimestamp() { return timestamp; }
+    public String getConversionPath() { return conversionPath; }
+
+    public boolean isDirect() { return "direct".equals(conversionPath); }
+    public String getFormattedResult() {
+        return String.format("%.2f %s = %.2f %s (rate: %.6f)",
+                originalAmount, fromCurrency, convertedAmount, toCurrency, exchangeRate);
+    }
 }
 ```
 
-### Error Types
+### Exception Hierarchy
 
-```typescript
-class InvalidCurrencyPairError extends Error {
-    constructor(from: string, to: string) {
-        super(`Invalid currency pair: ${from} -> ${to}`);
-        this.name = 'InvalidCurrencyPairError';
+```java
+// Base exception class for currency converter operations
+public class CurrencyConverterException extends Exception {
+    public CurrencyConverterException(String message) {
+        super(message);
+    }
+
+    public CurrencyConverterException(String message, Throwable cause) {
+        super(message, cause);
     }
 }
 
-class RateNotFoundError extends Error {
-    constructor(from: string, to: string) {
-        super(`Exchange rate not found for ${from} -> ${to}`);
-        this.name = 'RateNotFoundError';
+// Exception thrown when an invalid currency pair is used
+class InvalidCurrencyPairException extends CurrencyConverterException {
+    private final String fromCurrency;
+    private final String toCurrency;
+
+    public InvalidCurrencyPairException(String fromCurrency, String toCurrency) {
+        super(String.format("Invalid currency pair: %s -> %s", fromCurrency, toCurrency));
+        this.fromCurrency = fromCurrency;
+        this.toCurrency = toCurrency;
     }
+
+    public String getFromCurrency() { return fromCurrency; }
+    public String getToCurrency() { return toCurrency; }
+}
+
+// Exception thrown when an exchange rate is not found
+class RateNotFoundException extends CurrencyConverterException {
+    private final String fromCurrency;
+    private final String toCurrency;
+
+    public RateNotFoundException(String fromCurrency, String toCurrency) {
+        super(String.format("Exchange rate not found for %s -> %s", fromCurrency, toCurrency));
+        this.fromCurrency = fromCurrency;
+        this.toCurrency = toCurrency;
+    }
+
+    public String getFromCurrency() { return fromCurrency; }
+    public String getToCurrency() { return toCurrency; }
+}
+
+// Exception thrown when currency conversion fails
+class ConversionFailedException extends CurrencyConverterException {
+    private final String fromCurrency;
+    private final String toCurrency;
+    private final double amount;
+
+    public ConversionFailedException(String fromCurrency, String toCurrency, double amount, String reason) {
+        super(String.format("Failed to convert %.2f %s to %s: %s", amount, fromCurrency, toCurrency, reason));
+        this.fromCurrency = fromCurrency;
+        this.toCurrency = toCurrency;
+        this.amount = amount;
+    }
+
+    public String getFromCurrency() { return fromCurrency; }
+    public String getToCurrency() { return toCurrency; }
+    public double getAmount() { return amount; }
 }
 ```
 
@@ -262,35 +424,122 @@ class RateNotFoundError extends Error {
 
 ### CurrencyConverterService Architecture
 
-```typescript
-class CurrencyConverterService {
-    private converter: CurrencyConverter;
-    private rateFetcher: ExchangeRateFetcher;
+```java
+public class CurrencyConverterService {
+    private final CurrencyConverter converter;
+    private final ExchangeRateProvider rateProvider;
+    private final ScheduledExecutorService scheduler;
+    private final boolean autoUpdate;
+    private final long updateIntervalMinutes;
 
-    // Periodic rate updates
-    public startRateUpdates(intervalMs: number = 300000): void {
-        setInterval(async () => {
-            try {
-                const latestRates = await this.rateFetcher.fetchLatestRates();
-                this.converter.updateRates(latestRates);
-            } catch (error) {
-                console.error('Failed to update exchange rates:', error);
-            }
-        }, intervalMs);
+    private volatile boolean running = false;
+    private ScheduledFuture<?> updateTask;
+
+    // Service statistics
+    private volatile long totalServiceConversions = 0;
+    private volatile long rateUpdateCount = 0;
+    private volatile long failedUpdateCount = 0;
+    private volatile LocalDateTime lastUpdateTime;
+
+    public CurrencyConverterService(ExchangeRateProvider rateProvider, boolean autoUpdate, long updateIntervalMinutes) {
+        this.converter = new CurrencyConverter();
+        this.rateProvider = rateProvider;
+        this.autoUpdate = autoUpdate;
+        this.updateIntervalMinutes = updateIntervalMinutes;
+        this.scheduler = Executors.newScheduledThreadPool(2);
     }
 
-    // Rate fetching with error handling
-    private async fetchRatesWithRetry(retries: number = 3): Promise<ExchangeRate[]> {
-        for (let i = 0; i < retries; i++) {
-            try {
-                return await this.rateFetcher.fetchLatestRates();
-            } catch (error) {
-                if (i === retries - 1) throw error;
-                await this.delay(1000 * Math.pow(2, i)); // Exponential backoff
-            }
+    // Start the service with automatic rate updates
+    public synchronized void start() throws RateServiceUnavailableException {
+        if (running) {
+            return;
         }
-        throw new Error('Max retries exceeded');
+
+        // Initial rate fetch
+        try {
+            fetchAndUpdateRates();
+        } catch (Exception e) {
+            throw new RateServiceUnavailableException("Initial rate fetch", e);
+        }
+
+        // Start automatic updates if enabled
+        if (autoUpdate) {
+            startAutomaticUpdates();
+        }
+
+        running = true;
+        System.out.println("CurrencyConverterService started with " +
+                converter.getCachedRates().size() + " exchange rates");
     }
+
+    // Periodic rate updates with scheduling
+    private void startAutomaticUpdates() {
+        updateTask = scheduler.scheduleWithFixedDelay(
+                this::performScheduledRateUpdate,
+                updateIntervalMinutes,
+                updateIntervalMinutes,
+                TimeUnit.MINUTES
+        );
+    }
+
+    // Rate fetching with comprehensive error handling
+    private void fetchAndUpdateRates() throws RateServiceUnavailableException {
+        try {
+            List<ExchangeRate> rates = rateProvider.fetchLatestRates();
+            converter.updateRates(rates);
+
+            rateUpdateCount++;
+            lastUpdateTime = LocalDateTime.now();
+
+            System.out.println("Updated " + rates.size() + " exchange rates at " + lastUpdateTime);
+
+        } catch (Exception e) {
+            failedUpdateCount++;
+            throw new RateServiceUnavailableException(
+                    rateProvider.getClass().getSimpleName(), e);
+        }
+    }
+
+    // Convert currency with service-level features
+    public ConversionResult convert(String fromCurrency, String toCurrency, double amount)
+            throws CurrencyConverterException {
+
+        if (!running) {
+            throw new ConversionFailedException(fromCurrency, toCurrency, amount,
+                    "Service is not running");
+        }
+
+        totalServiceConversions++;
+        return converter.convert(fromCurrency, toCurrency, amount);
+    }
+
+    // Batch conversion support
+    public List<ConversionResult> convertBatch(List<ConversionRequest> requests)
+            throws CurrencyConverterException {
+
+        if (!running) {
+            throw new ConversionFailedException("", "", 0,
+                    "Service is not running");
+        }
+
+        return requests.parallelStream()
+                .map(request -> {
+                    try {
+                        return convert(request.getFromCurrency(),
+                                request.getToCurrency(),
+                                request.getAmount());
+                    } catch (CurrencyConverterException e) {
+                        throw new RuntimeException(e);
+                    }
+                })
+                .toList();
+    }
+}
+
+// Interface for external exchange rate providers
+interface ExchangeRateProvider {
+    List<ExchangeRate> fetchLatestRates() throws Exception;
+    String getProviderName();
 }
 ```
 
@@ -298,183 +547,321 @@ class CurrencyConverterService {
 
 ### Basic Currency Conversion
 
-```typescript
-import { CurrencyConverter } from './CurrencyConverter';
+```java
+import pair.currencyconverter.*;
 
-const converter = new CurrencyConverter();
+public class BasicConversionExample {
+    public static void main(String[] args) throws CurrencyConverterException {
+        CurrencyConverter converter = new CurrencyConverter();
 
-// Add exchange rates
-converter.addRate('USD', 'EUR', 0.85);
-converter.addRate('USD', 'GBP', 0.73);
-converter.addRate('USD', 'JPY', 110.0);
+        // Add exchange rates
+        converter.addRate("USD", "EUR", 0.85);
+        converter.addRate("USD", "GBP", 0.73);
+        converter.addRate("USD", "JPY", 110.0);
 
-// Direct conversion
-const result = converter.convert('USD', 'EUR', 100);
-console.log(result);
-// Output: {
-//   fromCurrency: 'USD',
-//   toCurrency: 'EUR',
-//   originalAmount: 100,
-//   convertedAmount: 85,
-//   exchangeRate: 0.85,
-//   timestamp: 2024-01-15T10:30:00.000Z
-// }
+        // Direct conversion
+        ConversionResult result = converter.convert("USD", "EUR", 100);
+        System.out.println(result.getFormattedResult());
+
+        // Output: 100.00 USD = 85.00 EUR (rate: 0.850000)
+
+        // Access individual fields
+        System.out.printf("From: %s%n", result.getFromCurrency());      // USD
+        System.out.printf("To: %s%n", result.getToCurrency());          // EUR
+        System.out.printf("Original: %.2f%n", result.getOriginalAmount()); // 100.00
+        System.out.printf("Converted: %.2f%n", result.getConvertedAmount()); // 85.00
+        System.out.printf("Rate: %.6f%n", result.getExchangeRate());    // 0.850000
+        System.out.printf("Timestamp: %s%n", result.getTimestamp());    // 2024-01-15T10:30:00
+        System.out.printf("Path: %s%n", result.getConversionPath());    // direct
+    }
+}
 ```
 
 ### Inverse Rate Calculation
 
-```typescript
-// Only have USD -> EUR rate (0.85)
-converter.addRate('USD', 'EUR', 0.85);
+```java
+public class InverseRateExample {
+    public static void main(String[] args) throws CurrencyConverterException {
+        CurrencyConverter converter = new CurrencyConverter();
 
-// Convert EUR -> USD (uses inverse calculation)
-const reverseResult = converter.convert('EUR', 'USD', 100);
-console.log(reverseResult.exchangeRate); // 1.176 (1 / 0.85)
-console.log(reverseResult.convertedAmount); // 117.65
+        // Only have USD -> EUR rate (0.85)
+        converter.addRate("USD", "EUR", 0.85);
+
+        // Convert EUR -> USD (uses inverse calculation)
+        ConversionResult reverseResult = converter.convert("EUR", "USD", 100);
+        System.out.printf("Exchange rate: %.3f (1 / 0.85)%n", reverseResult.getExchangeRate()); // 1.176
+        System.out.printf("Converted amount: %.2f%n", reverseResult.getConvertedAmount()); // 117.65
+        System.out.println("Path: " + reverseResult.getConversionPath()); // inverse
+    }
+}
 ```
 
 ### Triangular Conversion via USD
 
-```typescript
-// Add USD-based rates
-converter.addRate('USD', 'EUR', 0.85);
-converter.addRate('USD', 'JPY', 110.0);
+```java
+public class TriangularConversionExample {
+    public static void main(String[] args) throws CurrencyConverterException {
+        CurrencyConverter converter = new CurrencyConverter();
 
-// Convert EUR -> JPY (no direct rate)
-// Uses triangular conversion: EUR -> USD -> JPY
-const triangularResult = converter.convert('EUR', 'JPY', 100);
-console.log(triangularResult.exchangeRate); // 129.41 (110 / 0.85)
-console.log(triangularResult.convertedAmount); // 12,941
+        // Add USD-based rates
+        converter.addRate("USD", "EUR", 0.85);
+        converter.addRate("USD", "JPY", 110.0);
+
+        // Convert EUR -> JPY (no direct rate)
+        // Uses triangular conversion: EUR -> USD -> JPY
+        ConversionResult triangularResult = converter.convert("EUR", "JPY", 100);
+        System.out.printf("Exchange rate: %.2f (110 / 0.85)%n", triangularResult.getExchangeRate()); // 129.41
+        System.out.printf("Converted amount: %.0f%n", triangularResult.getConvertedAmount()); // 12,941
+        System.out.println("Detailed result: " + triangularResult.getDetailedResult());
+    }
+}
 ```
 
 ### Bulk Rate Updates
 
-```typescript
-const exchangeRates: ExchangeRate[] = [
-    { from: 'USD', to: 'EUR', rate: 0.85, timestamp: new Date() },
-    { from: 'USD', to: 'GBP', rate: 0.73, timestamp: new Date() },
-    { from: 'USD', to: 'JPY', rate: 110.0, timestamp: new Date() },
-    { from: 'EUR', to: 'GBP', rate: 0.86, timestamp: new Date() }
-];
+```java
+import java.time.LocalDateTime;
+import java.util.Arrays;
+import java.util.List;
 
-converter.updateRates(exchangeRates);
+public class BulkRateUpdateExample {
+    public static void main(String[] args) throws CurrencyConverterException {
+        CurrencyConverter converter = new CurrencyConverter();
 
-// All conversion paths are now available
-const results = [
-    converter.convert('USD', 'EUR', 1000),    // Direct
-    converter.convert('EUR', 'USD', 1000),    // Inverse
-    converter.convert('GBP', 'JPY', 1000),    // Triangular
-    converter.convert('EUR', 'GBP', 1000)     // Direct
-];
+        // Create list of exchange rates
+        List<ExchangeRate> exchangeRates = Arrays.asList(
+            new ExchangeRate("USD", "EUR", 0.85, LocalDateTime.now()),
+            new ExchangeRate("USD", "GBP", 0.73, LocalDateTime.now()),
+            new ExchangeRate("USD", "JPY", 110.0, LocalDateTime.now()),
+            new ExchangeRate("EUR", "GBP", 0.86, LocalDateTime.now())
+        );
+
+        converter.updateRates(exchangeRates);
+
+        // All conversion paths are now available
+        ConversionResult[] results = {
+            converter.convert("USD", "EUR", 1000),    // Direct
+            converter.convert("EUR", "USD", 1000),    // Inverse
+            converter.convert("GBP", "JPY", 1000),    // Triangular
+            converter.convert("EUR", "GBP", 1000)     // Direct
+        };
+
+        for (ConversionResult result : results) {
+            System.out.println(result.getDetailedResult());
+        }
+
+        // Display statistics
+        System.out.println("Converter stats: " + converter.getStats());
+    }
+}
 ```
 
 ### Service Layer Integration
 
-```typescript
-import { CurrencyConverterService } from './CurrencyConverterService';
+```java
+import java.util.concurrent.TimeUnit;
 
-const service = new CurrencyConverterService({
-    apiKey: 'your-api-key',
-    baseUrl: 'https://api.exchangerate.com',
-    updateInterval: 300000 // 5 minutes
-});
+public class ServiceLayerExample {
+    public static void main(String[] args) throws Exception {
+        // Create service with mock provider
+        MockExchangeRateProvider provider = new MockExchangeRateProvider();
+        CurrencyConverterService service = new CurrencyConverterService(provider, true, 60);
 
-// Start automatic rate updates
-service.startRateUpdates();
+        // Start automatic rate updates
+        service.start();
 
-// Perform conversions with always up-to-date rates
-async function convertWithLiveRates(from: string, to: string, amount: number) {
-    try {
-        const result = await service.convert(from, to, amount);
-        return result;
-    } catch (error) {
-        if (error instanceof RateNotFoundError) {
-            console.log(`No rate available for ${from} -> ${to}`);
+        try {
+            // Perform conversions with always up-to-date rates
+            ConversionResult result = convertWithLiveRates(service, "USD", "EUR", 1000);
+            if (result != null) {
+                System.out.println("Live conversion: " + result.getFormattedResult());
+            }
+
+            // Get service statistics
+            CurrencyConverterService.ServiceStats stats = service.getServiceStats();
+            System.out.println("Service stats: " + stats);
+
+        } finally {
+            service.stop();
+        }
+    }
+
+    private static ConversionResult convertWithLiveRates(CurrencyConverterService service,
+                                                       String from, String to, double amount) {
+        try {
+            return service.convert(from, to, amount);
+        } catch (RateNotFoundException e) {
+            System.out.printf("No rate available for %s -> %s%n", from, to);
+            return null;
+        } catch (CurrencyConverterException e) {
+            System.err.println("Conversion failed: " + e.getMessage());
             return null;
         }
-        throw error;
     }
 }
 ```
 
 ### Portfolio Value Calculation
 
-```typescript
-class PortfolioConverter {
-    private converter: CurrencyConverter;
+```java
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 
-    constructor(converter: CurrencyConverter) {
+public class PortfolioConverter {
+    private final CurrencyConverter converter;
+
+    public PortfolioConverter(CurrencyConverter converter) {
         this.converter = converter;
     }
 
-    public calculatePortfolioValue(
-        holdings: Array<{ currency: string; amount: number }>,
-        targetCurrency: string
-    ): { totalValue: number; breakdown: ConversionResult[] } {
-        const breakdown: ConversionResult[] = [];
-        let totalValue = 0;
+    public static class Holding {
+        private final String currency;
+        private final double amount;
 
-        for (const holding of holdings) {
-            const result = this.converter.convert(
-                holding.currency,
-                targetCurrency,
-                holding.amount
-            );
-            breakdown.push(result);
-            totalValue += result.convertedAmount;
+        public Holding(String currency, double amount) {
+            this.currency = currency;
+            this.amount = amount;
         }
 
-        return { totalValue, breakdown };
+        public String getCurrency() { return currency; }
+        public double getAmount() { return amount; }
+    }
+
+    public static class PortfolioResult {
+        private final double totalValue;
+        private final List<ConversionResult> breakdown;
+
+        public PortfolioResult(double totalValue, List<ConversionResult> breakdown) {
+            this.totalValue = totalValue;
+            this.breakdown = breakdown;
+        }
+
+        public double getTotalValue() { return totalValue; }
+        public List<ConversionResult> getBreakdown() { return breakdown; }
+    }
+
+    public PortfolioResult calculatePortfolioValue(List<Holding> holdings, String targetCurrency)
+            throws CurrencyConverterException {
+        List<ConversionResult> breakdown = new ArrayList<>();
+        double totalValue = 0;
+
+        for (Holding holding : holdings) {
+            ConversionResult result = converter.convert(
+                    holding.getCurrency(),
+                    targetCurrency,
+                    holding.getAmount()
+            );
+            breakdown.add(result);
+            totalValue += result.getConvertedAmount();
+        }
+
+        return new PortfolioResult(totalValue, breakdown);
+    }
+
+    // Usage example
+    public static void main(String[] args) throws CurrencyConverterException {
+        CurrencyConverter converter = new CurrencyConverter();
+
+        // Add rates
+        converter.addRate("USD", "EUR", 0.85);
+        converter.addRate("USD", "GBP", 0.73);
+        converter.addRate("USD", "JPY", 110.0);
+
+        PortfolioConverter portfolio = new PortfolioConverter(converter);
+        List<Holding> holdings = Arrays.asList(
+            new Holding("USD", 10000),
+            new Holding("EUR", 5000),
+            new Holding("GBP", 3000),
+            new Holding("JPY", 500000)
+        );
+
+        PortfolioResult portfolioValue = portfolio.calculatePortfolioValue(holdings, "USD");
+        System.out.printf("Total portfolio value: $%.2f%n", portfolioValue.getTotalValue());
+
+        // Display breakdown
+        System.out.println("Portfolio breakdown:");
+        for (ConversionResult result : portfolioValue.getBreakdown()) {
+            System.out.println("  " + result.getFormattedResult());
+        }
     }
 }
-
-// Usage
-const portfolio = new PortfolioConverter(converter);
-const holdings = [
-    { currency: 'USD', amount: 10000 },
-    { currency: 'EUR', amount: 5000 },
-    { currency: 'GBP', amount: 3000 },
-    { currency: 'JPY', amount: 500000 }
-];
-
-const portfolioValue = portfolio.calculatePortfolioValue(holdings, 'USD');
-console.log(`Total portfolio value: $${portfolioValue.totalValue.toFixed(2)}`);
 ```
 
 ## Caching Strategy
 
 ### Rate Caching
 
-```typescript
-// Rates are cached with timestamps for freshness validation
-private rates: RateCache = {};
+```java
+// Thread-safe rate cache with concurrent access
+private final Map<String, ExchangeRate> rateCache = new ConcurrentHashMap<>();
 
-public updateRates(rates: ExchangeRate[]): void {
-    rates.forEach(rate => {
-        this.validateCurrencyPair(rate.from, rate.to);
-        const key = this.generateRateKey(rate.from, rate.to);
-        this.rates[key] = {
-            ...rate,
-            timestamp: new Date() // Update timestamp on cache
-        };
-    });
+// Update multiple exchange rates in batch
+public void updateRates(List<ExchangeRate> rates) {
+    if (rates == null || rates.isEmpty()) {
+        return;
+    }
+
+    for (ExchangeRate rate : rates) {
+        try {
+            validateCurrencyPair(rate.getFromCurrency(), rate.getToCurrency());
+            rateCache.put(rate.getKey(), rate);
+        } catch (InvalidCurrencyPairException e) {
+            System.err.println("Skipping invalid rate: " + e.getMessage());
+        }
+    }
+}
+
+// Clear expired rates from cache
+public void clearExpiredRates() {
+    rateCache.entrySet().removeIf(entry ->
+            entry.getValue().isExpired(rateExpirationMinutes));
+}
+
+// Get all cached rates
+public List<ExchangeRate> getCachedRates() {
+    return new ArrayList<>(rateCache.values());
 }
 ```
 
 ### Conversion Result Caching
 
-```typescript
-// Cache recent conversion results for repeated queries
-private conversionHistory: ConversionCache = {};
+```java
+// Conversion result cache for performance optimization
+private final Map<String, ConversionResult> conversionCache = new ConcurrentHashMap<>();
 
-private cacheConversionResult(result: ConversionResult): void {
-    const key = this.generateRateKey(result.fromCurrency, result.toCurrency);
-    this.conversionHistory[key] = result;
+// Cache conversion result if caching is enabled
+private void cacheConversionResult(String cacheKey, ConversionResult result) {
+    if (cacheConversions) {
+        conversionCache.put(cacheKey, result);
+    }
 }
 
-public getLastConversion(from: string, to: string): ConversionResult | null {
-    const key = this.generateRateKey(from, to);
-    return this.conversionHistory[key] || null;
+// Check if cached result is still valid
+private boolean isResultExpired(ConversionResult result) {
+    return result.getTimestamp().plusMinutes(rateExpirationMinutes).isBefore(LocalDateTime.now());
+}
+
+// Clear conversion cache
+public void clearConversionCache() {
+    conversionCache.clear();
+}
+
+// Get conversion statistics including cache performance
+public ConversionStats getStats() {
+    return new ConversionStats(
+            totalConversions,
+            cacheHits,
+            cacheMisses,
+            rateCache.size(),
+            conversionCache.size(),
+            supportedCurrencies.size()
+    );
+}
+
+// Helper method to generate cache keys
+private String generateCacheKey(String fromCurrency, String toCurrency, double amount) {
+    return String.format("%s_%s_%.2f", fromCurrency, toCurrency, amount);
 }
 ```
 
@@ -482,48 +869,143 @@ public getLastConversion(from: string, to: string): ConversionResult | null {
 
 ### Validation and Error Recovery
 
-```typescript
+```java
 // Comprehensive error handling with specific exception types
-public convert(from: string, to: string, amount: number): ConversionResult {
+public ConversionResult convert(String fromCurrency, String toCurrency, double amount)
+        throws CurrencyConverterException {
     try {
-        this.validateCurrencyPair(from, to);
-        this.validateAmount(amount);
+        validateCurrencyPair(fromCurrency, toCurrency);
+        validateAmount(amount);
 
         // Conversion logic...
-        return result;
+        return performConversion(fromCurrency, toCurrency, amount);
 
-    } catch (error) {
-        if (error instanceof InvalidCurrencyPairError) {
-            // Log and suggest alternatives
-            console.warn(`Invalid pair ${from}-${to}. Supported:`,
-                        this.getSupportedCurrencies());
-        } else if (error instanceof RateNotFoundError) {
-            // Try alternative conversion paths
-            return this.tryAlternativeConversion(from, to, amount);
+    } catch (InvalidCurrencyPairException e) {
+        // Log and suggest alternatives
+        System.err.printf("Invalid pair %s-%s. Supported currencies: %s%n",
+                fromCurrency, toCurrency, getSupportedCurrencies());
+        throw e;
+    } catch (RateNotFoundException e) {
+        // Try alternative conversion paths if available
+        try {
+            return tryAlternativeConversion(fromCurrency, toCurrency, amount);
+        } catch (CurrencyConverterException alternativeError) {
+            // If alternative also fails, throw original error
+            throw e;
         }
-        throw error;
+    } catch (ConversionFailedException e) {
+        System.err.println("Conversion failed: " + e.getMessage());
+        throw e;
     }
 }
 
-private tryAlternativeConversion(from: string, to: string, amount: number): ConversionResult {
+// Validation methods
+private void validateCurrencyPair(String fromCurrency, String toCurrency) throws InvalidCurrencyPairException {
+    if (fromCurrency == null || fromCurrency.trim().isEmpty()) {
+        throw new InvalidCurrencyPairException(fromCurrency, toCurrency);
+    }
+    if (toCurrency == null || toCurrency.trim().isEmpty()) {
+        throw new InvalidCurrencyPairException(fromCurrency, toCurrency);
+    }
+
+    String fromUpper = fromCurrency.toUpperCase();
+    String toUpper = toCurrency.toUpperCase();
+
+    if (!supportedCurrencies.contains(fromUpper)) {
+        throw new InvalidCurrencyPairException(fromCurrency, toCurrency);
+    }
+    if (!supportedCurrencies.contains(toUpper)) {
+        throw new InvalidCurrencyPairException(fromCurrency, toCurrency);
+    }
+}
+
+private void validateAmount(double amount) throws ConversionFailedException {
+    if (amount < 0) {
+        throw new ConversionFailedException("", "", amount, "Amount cannot be negative");
+    }
+    if (Double.isNaN(amount) || Double.isInfinite(amount)) {
+        throw new ConversionFailedException("", "", amount, "Amount must be a valid number");
+    }
+}
+
+// Alternative conversion path finder
+private ConversionResult tryAlternativeConversion(String fromCurrency, String toCurrency, double amount)
+        throws CurrencyConverterException {
     // Attempt conversion through multiple intermediate currencies
-    const intermediates = ['USD', 'EUR', 'GBP'];
+    String[] intermediates = {"USD", "EUR", "GBP", "JPY"};
 
-    for (const intermediate of intermediates) {
-        try {
-            if (intermediate !== from && intermediate !== to) {
-                const step1 = this.convert(from, intermediate, amount);
-                const step2 = this.convert(intermediate, to, step1.convertedAmount);
+    for (String intermediate : intermediates) {
+        if (!intermediate.equals(fromCurrency) && !intermediate.equals(toCurrency)) {
+            try {
+                // Try two-step conversion
+                ExchangeRateResult step1 = getDirectExchangeRate(fromCurrency, intermediate);
+                ExchangeRateResult step2 = getDirectExchangeRate(intermediate, toCurrency);
 
-                // Combine the two-step conversion into a single result
-                return this.combineConversions(step1, step2, amount);
+                if (step1 != null && step2 != null) {
+                    double combinedRate = step1.getRate() * step2.getRate();
+                    double convertedAmount = amount * combinedRate;
+                    String path = String.format("alternative_via_%s(%s->%s->%s)",
+                            intermediate, fromCurrency, intermediate, toCurrency);
+
+                    return createConversionResult(fromCurrency, toCurrency, amount,
+                            convertedAmount, combinedRate, path);
+                }
+            } catch (Exception e) {
+                // Continue to next intermediate currency
+                continue;
             }
-        } catch (error) {
-            continue; // Try next intermediate currency
         }
     }
 
-    throw new RateNotFoundError(from, to);
+    throw new RateNotFoundException(fromCurrency, toCurrency);
+}
+
+// Example error handling in service layer
+public class ErrorHandlingExample {
+    public static void main(String[] args) {
+        CurrencyConverter converter = new CurrencyConverter();
+
+        try {
+            converter.addRate("USD", "EUR", 0.85);
+        } catch (InvalidCurrencyPairException e) {
+            System.err.println("Failed to add rate: " + e.getMessage());
+            return;
+        }
+
+        // Test various error scenarios
+        testErrorScenario("Invalid currency pair", () -> {
+            try {
+                converter.convert("USD", "XYZ", 100.0);
+            } catch (CurrencyConverterException e) {
+                throw new RuntimeException(e);
+            }
+        });
+
+        testErrorScenario("Rate not found", () -> {
+            try {
+                converter.convert("GBP", "JPY", 100.0);
+            } catch (CurrencyConverterException e) {
+                throw new RuntimeException(e);
+            }
+        });
+
+        testErrorScenario("Negative amount", () -> {
+            try {
+                converter.convert("USD", "EUR", -100.0);
+            } catch (CurrencyConverterException e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+    private static void testErrorScenario(String scenarioName, Runnable test) {
+        try {
+            test.run();
+            System.out.println("  " + scenarioName + ": ERROR - Expected exception but none was thrown");
+        } catch (Exception e) {
+            System.out.println("  " + scenarioName + ": OK - " + e.getClass().getSimpleName() + ": " + e.getMessage());
+        }
+    }
 }
 ```
 
@@ -531,51 +1013,215 @@ private tryAlternativeConversion(from: string, to: string, amount: number): Conv
 
 ### Unit Tests Example
 
-```typescript
-describe('CurrencyConverter', () => {
-    let converter: CurrencyConverter;
+```java
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.DisplayName;
+import static org.junit.jupiter.api.Assertions.*;
 
-    beforeEach(() => {
+public class CurrencyConverterTest {
+    private CurrencyConverter converter;
+
+    @BeforeEach
+    void setUp() throws InvalidCurrencyPairException {
         converter = new CurrencyConverter();
-        converter.addRate('USD', 'EUR', 0.85);
-        converter.addRate('USD', 'GBP', 0.73);
-    });
+        converter.addRate("USD", "EUR", 0.85);
+        converter.addRate("USD", "GBP", 0.73);
+    }
 
-    it('should perform direct conversion', () => {
-        const result = converter.convert('USD', 'EUR', 100);
+    @Test
+    @DisplayName("Should perform direct conversion")
+    void testDirectConversion() throws CurrencyConverterException {
+        ConversionResult result = converter.convert("USD", "EUR", 100);
 
-        expect(result.fromCurrency).toBe('USD');
-        expect(result.toCurrency).toBe('EUR');
-        expect(result.originalAmount).toBe(100);
-        expect(result.convertedAmount).toBe(85);
-        expect(result.exchangeRate).toBe(0.85);
-    });
+        assertEquals("USD", result.getFromCurrency());
+        assertEquals("EUR", result.getToCurrency());
+        assertEquals(100.0, result.getOriginalAmount(), 0.001);
+        assertEquals(85.0, result.getConvertedAmount(), 0.001);
+        assertEquals(0.85, result.getExchangeRate(), 0.001);
+        assertEquals("direct", result.getConversionPath());
+        assertTrue(result.isDirect());
+    }
 
-    it('should perform inverse conversion', () => {
-        const result = converter.convert('EUR', 'USD', 85);
+    @Test
+    @DisplayName("Should perform inverse conversion")
+    void testInverseConversion() throws CurrencyConverterException {
+        ConversionResult result = converter.convert("EUR", "USD", 85);
 
-        expect(result.exchangeRate).toBeCloseTo(1.176, 3);
-        expect(result.convertedAmount).toBeCloseTo(100, 2);
-    });
+        assertEquals(1.176, result.getExchangeRate(), 0.001); // 1 / 0.85
+        assertEquals(100.0, result.getConvertedAmount(), 0.01);
+        assertEquals("inverse", result.getConversionPath());
+        assertFalse(result.isDirect());
+    }
 
-    it('should handle triangular conversion', () => {
-        const result = converter.convert('EUR', 'GBP', 100);
+    @Test
+    @DisplayName("Should handle triangular conversion via USD")
+    void testTriangularConversion() throws CurrencyConverterException {
+        ConversionResult result = converter.convert("EUR", "GBP", 100);
 
         // EUR -> USD -> GBP: (1/0.85) * 0.73 = 0.8588
-        expect(result.exchangeRate).toBeCloseTo(0.8588, 4);
-    });
+        assertEquals(0.8588, result.getExchangeRate(), 0.0001);
+        assertEquals(85.88, result.getConvertedAmount(), 0.01);
+        assertTrue(result.getConversionPath().contains("triangular"));
+    }
 
-    it('should throw error for unsupported currency', () => {
-        expect(() => converter.convert('USD', 'XYZ', 100))
-            .toThrow(InvalidCurrencyPairError);
-    });
+    @Test
+    @DisplayName("Should handle same currency conversion")
+    void testSameCurrencyConversion() throws CurrencyConverterException {
+        ConversionResult result = converter.convert("USD", "USD", 100);
 
-    it('should throw error when no rate path exists', () => {
-        const isolatedConverter = new CurrencyConverter();
-        expect(() => isolatedConverter.convert('EUR', 'GBP', 100))
-            .toThrow(RateNotFoundError);
-    });
-});
+        assertEquals(100.0, result.getConvertedAmount(), 0.001);
+        assertEquals(1.0, result.getExchangeRate(), 0.001);
+        assertEquals("same", result.getConversionPath());
+    }
+
+    @Test
+    @DisplayName("Should throw InvalidCurrencyPairException for unsupported currency")
+    void testUnsupportedCurrency() {
+        assertThrows(InvalidCurrencyPairException.class, () -> {
+            converter.convert("USD", "XYZ", 100);
+        });
+    }
+
+    @Test
+    @DisplayName("Should throw RateNotFoundException when no rate path exists")
+    void testNoRatePath() {
+        CurrencyConverter isolatedConverter = new CurrencyConverter();
+
+        assertThrows(RateNotFoundException.class, () -> {
+            isolatedConverter.convert("EUR", "GBP", 100);
+        });
+    }
+
+    @Test
+    @DisplayName("Should throw ConversionFailedException for negative amount")
+    void testNegativeAmount() {
+        assertThrows(ConversionFailedException.class, () -> {
+            converter.convert("USD", "EUR", -100);
+        });
+    }
+
+    @Test
+    @DisplayName("Should throw ConversionFailedException for NaN amount")
+    void testNaNAmount() {
+        assertThrows(ConversionFailedException.class, () -> {
+            converter.convert("USD", "EUR", Double.NaN);
+        });
+    }
+
+    @Test
+    @DisplayName("Should maintain statistics correctly")
+    void testStatistics() throws CurrencyConverterException {
+        // Perform several conversions
+        converter.convert("USD", "EUR", 100);
+        converter.convert("EUR", "USD", 85);
+        converter.convert("USD", "GBP", 100);
+
+        CurrencyConverter.ConversionStats stats = converter.getStats();
+        assertEquals(3, stats.getTotalConversions());
+        assertTrue(stats.getCachedRates() >= 2); // At least USD->EUR and USD->GBP
+    }
+
+    @Test
+    @DisplayName("Should cache conversion results when enabled")
+    void testConversionCaching() throws CurrencyConverterException {
+        CurrencyConverter cachingConverter = new CurrencyConverter(60, true);
+        cachingConverter.addRate("USD", "EUR", 0.85);
+
+        // First conversion
+        ConversionResult result1 = cachingConverter.convert("USD", "EUR", 100);
+
+        // Second conversion with same parameters should hit cache
+        ConversionResult result2 = cachingConverter.convert("USD", "EUR", 100);
+
+        CurrencyConverter.ConversionStats stats = cachingConverter.getStats();
+        assertTrue(stats.getCacheHits() > 0);
+    }
+
+    @Test
+    @DisplayName("Should clear expired rates")
+    void testRateExpiration() throws InterruptedException, InvalidCurrencyPairException {
+        CurrencyConverter shortLivedConverter = new CurrencyConverter(0, false); // 0 minute expiration
+        shortLivedConverter.addRate("USD", "EUR", 0.85);
+
+        // Wait a moment for rate to expire
+        Thread.sleep(1000);
+
+        // Clear expired rates
+        shortLivedConverter.clearExpiredRates();
+
+        // Should now throw RateNotFoundException
+        assertThrows(RateNotFoundException.class, () -> {
+            shortLivedConverter.convert("USD", "EUR", 100);
+        });
+    }
+}
+
+// Integration test example
+public class CurrencyConverterServiceTest {
+    private CurrencyConverterService service;
+    private MockExchangeRateProvider mockProvider;
+
+    @BeforeEach
+    void setUp() {
+        mockProvider = new MockExchangeRateProvider();
+        service = new CurrencyConverterService(mockProvider, false, 60);
+    }
+
+    @Test
+    @DisplayName("Should start service and fetch initial rates")
+    void testServiceStart() throws Exception {
+        service.start();
+
+        assertTrue(service.isRunning());
+
+        CurrencyConverterService.ServiceStats stats = service.getServiceStats();
+        assertTrue(stats.getRateUpdateCount() > 0);
+
+        service.stop();
+        assertFalse(service.isRunning());
+    }
+
+    @Test
+    @DisplayName("Should handle service conversion")
+    void testServiceConversion() throws Exception {
+        service.start();
+
+        try {
+            ConversionResult result = service.convert("USD", "EUR", 1000);
+            assertNotNull(result);
+            assertEquals("USD", result.getFromCurrency());
+            assertEquals("EUR", result.getToCurrency());
+            assertEquals(1000.0, result.getOriginalAmount(), 0.001);
+        } finally {
+            service.stop();
+        }
+    }
+
+    @Test
+    @DisplayName("Should handle batch conversions")
+    void testBatchConversion() throws Exception {
+        service.start();
+
+        try {
+            List<CurrencyConverterService.ConversionRequest> requests = Arrays.asList(
+                new CurrencyConverterService.ConversionRequest("USD", "EUR", 1000),
+                new CurrencyConverterService.ConversionRequest("EUR", "GBP", 850),
+                new CurrencyConverterService.ConversionRequest("GBP", "JPY", 620)
+            );
+
+            List<ConversionResult> results = service.convertBatch(requests);
+            assertEquals(3, results.size());
+
+            for (ConversionResult result : results) {
+                assertNotNull(result);
+                assertTrue(result.getConvertedAmount() > 0);
+            }
+        } finally {
+            service.stop();
+        }
+    }
+}
 ```
 
 ## Performance Considerations
@@ -594,25 +1240,209 @@ describe('CurrencyConverter', () => {
 
 ### Optimization Strategies
 
-```typescript
-// Rate key generation optimization
-private generateRateKey(from: string, to: string): string {
-    // Normalize to uppercase once and cache
-    return `${from.toUpperCase()}_${to.toUpperCase()}`;
+```java
+// Rate key generation optimization with string interning
+private String generateRateKey(String from, String to) {
+    // Normalize to uppercase once and use efficient string concatenation
+    return (from.toUpperCase() + "_" + to.toUpperCase()).intern();
 }
 
 // Batch rate updates for better performance
-public updateRatesBatch(rates: ExchangeRate[]): void {
-    const updates: Record<string, ExchangeRate & { timestamp: Date }> = {};
+public void updateRatesBatch(List<ExchangeRate> rates) {
+    if (rates == null || rates.isEmpty()) {
+        return;
+    }
 
-    rates.forEach(rate => {
-        this.validateCurrencyPair(rate.from, rate.to);
-        const key = this.generateRateKey(rate.from, rate.to);
-        updates[key] = { ...rate, timestamp: new Date() };
-    });
+    // Use temporary map to batch all updates
+    Map<String, ExchangeRate> updates = new HashMap<>(rates.size());
 
-    // Single batch update to minimize object property assignments
-    Object.assign(this.rates, updates);
+    for (ExchangeRate rate : rates) {
+        try {
+            validateCurrencyPair(rate.getFromCurrency(), rate.getToCurrency());
+            String key = rate.getKey();
+            updates.put(key, rate);
+        } catch (InvalidCurrencyPairException e) {
+            System.err.println("Skipping invalid rate: " + e.getMessage());
+        }
+    }
+
+    // Single batch update to minimize synchronization overhead
+    rateCache.putAll(updates);
+}
+
+// Optimized conversion with minimal object creation
+public ConversionResult convertOptimized(String fromCurrency, String toCurrency, double amount)
+        throws CurrencyConverterException {
+
+    // Pre-normalize currencies to avoid repeated operations
+    final String fromUpper = fromCurrency.toUpperCase();
+    final String toUpper = toCurrency.toUpperCase();
+
+    validateCurrencyPair(fromUpper, toUpper);
+    validateAmount(amount);
+
+    totalConversions++;
+
+    // Same currency conversion - fast path
+    if (fromUpper.equals(toUpper)) {
+        return new ConversionResult(fromUpper, toUpper, amount, amount, 1.0,
+                LocalDateTime.now(), "same");
+    }
+
+    // Try direct rate first - most common case
+    final String directKey = fromUpper + "_" + toUpper;
+    ExchangeRate directRate = rateCache.get(directKey);
+    if (directRate != null && !directRate.isExpired(rateExpirationMinutes)) {
+        double convertedAmount = amount * directRate.getRate();
+        return createConversionResult(fromUpper, toUpper, amount, convertedAmount,
+                directRate.getRate(), "direct");
+    }
+
+    // Continue with other resolution strategies...
+    return resolveRateAndConvert(fromUpper, toUpper, amount);
+}
+
+// Performance monitoring and metrics
+public static class PerformanceMetrics {
+    private final long startTime;
+    private final AtomicLong totalConversions = new AtomicLong(0);
+    private final AtomicLong totalTime = new AtomicLong(0);
+    private final AtomicLong maxTime = new AtomicLong(0);
+    private final AtomicLong minTime = new AtomicLong(Long.MAX_VALUE);
+
+    public PerformanceMetrics() {
+        this.startTime = System.nanoTime();
+    }
+
+    public void recordConversion(long conversionTimeNanos) {
+        totalConversions.incrementAndGet();
+        totalTime.addAndGet(conversionTimeNanos);
+
+        // Update max time
+        long currentMax = maxTime.get();
+        while (conversionTimeNanos > currentMax &&
+               !maxTime.compareAndSet(currentMax, conversionTimeNanos)) {
+            currentMax = maxTime.get();
+        }
+
+        // Update min time
+        long currentMin = minTime.get();
+        while (conversionTimeNanos < currentMin &&
+               !minTime.compareAndSet(currentMin, conversionTimeNanos)) {
+            currentMin = minTime.get();
+        }
+    }
+
+    public double getAverageTimeMillis() {
+        long total = totalConversions.get();
+        return total > 0 ? (totalTime.get() / (double) total) / 1_000_000.0 : 0.0;
+    }
+
+    public double getConversionsPerSecond() {
+        long elapsed = System.nanoTime() - startTime;
+        return totalConversions.get() / (elapsed / 1_000_000_000.0);
+    }
+
+    public long getMaxTimeMillis() {
+        return maxTime.get() / 1_000_000;
+    }
+
+    public long getMinTimeMillis() {
+        long min = minTime.get();
+        return min == Long.MAX_VALUE ? 0 : min / 1_000_000;
+    }
+
+    @Override
+    public String toString() {
+        return String.format(
+            "PerformanceMetrics{conversions=%d, avgTime=%.3fms, rate=%.0f ops/sec, max=%dms, min=%dms}",
+            totalConversions.get(), getAverageTimeMillis(), getConversionsPerSecond(),
+            getMaxTimeMillis(), getMinTimeMillis()
+        );
+    }
+}
+
+// Memory-efficient rate storage for high-frequency operations
+public class CompactRateStorage {
+    // Use primitive collections for better memory efficiency
+    private final TObjectDoubleMap<String> rates = new TObjectDoubleHashMap<>();
+    private final TObjectLongMap<String> timestamps = new TObjectLongHashMap<>();
+
+    public void putRate(String key, double rate, long timestamp) {
+        rates.put(key, rate);
+        timestamps.put(key, timestamp);
+    }
+
+    public OptionalDouble getRate(String key, long maxAgeMillis) {
+        if (!rates.containsKey(key)) {
+            return OptionalDouble.empty();
+        }
+
+        long timestamp = timestamps.get(key);
+        if (System.currentTimeMillis() - timestamp > maxAgeMillis) {
+            return OptionalDouble.empty(); // Expired
+        }
+
+        return OptionalDouble.of(rates.get(key));
+    }
+
+    public int size() {
+        return rates.size();
+    }
+
+    public void clear() {
+        rates.clear();
+        timestamps.clear();
+    }
+}
+
+// Benchmark example
+public class PerformanceBenchmark {
+    public static void main(String[] args) throws Exception {
+        // Setup
+        CurrencyConverter converter = new CurrencyConverter();
+        MockExchangeRateProvider provider = new MockExchangeRateProvider();
+        List<ExchangeRate> rates = provider.fetchLatestRates();
+        converter.updateRates(rates);
+
+        PerformanceMetrics metrics = new PerformanceMetrics();
+
+        // Warm-up phase
+        System.out.println("Warming up...");
+        for (int i = 0; i < 10000; i++) {
+            converter.convert("USD", "EUR", 100.0 + i % 100);
+        }
+
+        // Benchmark phase
+        System.out.println("Running benchmark...");
+        int iterations = 100000;
+        long startTime = System.nanoTime();
+
+        for (int i = 0; i < iterations; i++) {
+            long conversionStart = System.nanoTime();
+            converter.convert("USD", "EUR", 100.0 + i % 1000);
+            long conversionTime = System.nanoTime() - conversionStart;
+            metrics.recordConversion(conversionTime);
+        }
+
+        long totalTime = System.nanoTime() - startTime;
+        double totalSeconds = totalTime / 1_000_000_000.0;
+        double operationsPerSecond = iterations / totalSeconds;
+
+        // Results
+        System.out.printf("Completed %d conversions in %.2f seconds%n", iterations, totalSeconds);
+        System.out.printf("Performance: %.0f operations per second%n", operationsPerSecond);
+        System.out.println("Detailed metrics: " + metrics);
+
+        // Memory usage
+        Runtime runtime = Runtime.getRuntime();
+        long usedMemory = runtime.totalMemory() - runtime.freeMemory();
+        System.out.printf("Memory usage: %.2f MB%n", usedMemory / (1024.0 * 1024.0));
+
+        // Cache statistics
+        CurrencyConverter.ConversionStats stats = converter.getStats();
+        System.out.printf("Cache hit ratio: %.1f%%%n", stats.getCacheHitRatio() * 100);
+    }
 }
 ```
 
